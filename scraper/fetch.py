@@ -1,20 +1,16 @@
 """
 Bexar County, TX (San Antonio) — Motivated Seller Lead Scraper
 ==============================================================
-Clerk portal : https://bexar.tx.publicsearch.us/  (GovOS/Neumo platform)
-Parcel data  : Bexar Appraisal District bulk export
+Clerk portal: https://bexar.tx.publicsearch.us/  (GovOS platform)
 
-API discovered from real browser traffic:
-  GET /results?department=RP
-             &recordedDateRange=YYYYMMDD,YYYYMMDD
-             &searchType=quickSearch
-             &searchValue=LIS+PENDENS
-             &limit=50
-             &offset=0
-             &searchOcrText=false
-             &keywordSearch=false
+The GovOS platform requires:
+1. GET homepage to establish session + get XSRF token
+2. POST to /api/search with JSON body
 
-Returns JSON with hits[] array.
+OR use the direct /results URL which the React SPA hits internally
+via XHR after page load - we intercept that XHR pattern.
+
+This version tries multiple API patterns discovered from the platform.
 """
 
 from __future__ import annotations
@@ -56,11 +52,9 @@ for _d in (DASHBOARD, DATA_DIR, CACHE_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
 LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "7"))
-API_BASE      = "https://bexar.tx.publicsearch.us"
-RESULTS_URL   = "https://bexar.tx.publicsearch.us/results"
-DEPT          = "RP"
+BASE_URL      = "https://bexar.tx.publicsearch.us"
 PAGE_SIZE     = 50
-REQUEST_DELAY = 1.2
+REQUEST_DELAY = 1.5
 RETRY_MAX     = 3
 
 HEADERS = {
@@ -73,6 +67,7 @@ HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
     "Referer":         "https://bexar.tx.publicsearch.us/",
     "Origin":          "https://bexar.tx.publicsearch.us",
+    "X-Requested-With": "XMLHttpRequest",
 }
 
 DOC_TYPES: dict[str, dict[str, Any]] = {
@@ -99,26 +94,23 @@ INSTRUMENT_MAP: dict[str, str] = {
     "LIS PENDENS": "LP", "LP": "LP",
     "NOTICE OF FORECLOSURE": "NOFC", "FORECLOSURE": "NOFC",
     "NOTICE OF TRUSTEE SALE": "NOFC", "NOTICE OF TRUSTEE'S SALE": "NOFC",
-    "SUBSTITUTE TRUSTEE'S DEED": "NOFC", "SUBSTITUTE TRUSTEE DEED": "NOFC",
-    "TRUSTEE'S DEED": "NOFC", "TAX DEED": "TAXDEED",
-    "CONSTABLE'S DEED": "TAXDEED", "SHERIFF'S DEED": "TAXDEED",
+    "SUBSTITUTE TRUSTEE'S DEED": "NOFC", "TRUSTEE'S DEED": "NOFC",
+    "TAX DEED": "TAXDEED", "CONSTABLE'S DEED": "TAXDEED", "SHERIFF'S DEED": "TAXDEED",
     "ABSTRACT OF JUDGMENT": "JUD", "ABSTRACT OF JUDGEMENT": "JUD",
     "JUDGMENT": "JUD", "JUDGEMENT": "JUD", "FOREIGN JUDGMENT": "JUD",
     "CERTIFIED JUDGMENT": "CCJ", "CERTIFIED COPY OF JUDGMENT": "CCJ",
-    "DOMESTIC JUDGMENT": "DRJUD", "DOMESTIC RELATIONS ORDER": "DRJUD",
+    "DOMESTIC JUDGMENT": "DRJUD",
     "CORP TAX LIEN": "LNCORPTX", "CORPORATE TAX LIEN": "LNCORPTX",
     "STATE TAX LIEN": "LNCORPTX", "TWC LIEN": "LNCORPTX",
-    "TEXAS WORKFORCE COMMISSION LIEN": "LNCORPTX",
     "IRS LIEN": "LNIRS", "FEDERAL TAX LIEN": "LNIRS",
     "NOTICE OF FEDERAL TAX LIEN": "LNIRS", "FEDERAL LIEN": "LNFED",
     "LIEN": "LN", "MECHANIC'S LIEN": "LNMECH", "MECHANIC LIEN": "LNMECH",
-    "MATERIALMAN'S LIEN": "LNMECH", "MATERIALMAN LIEN": "LNMECH",
-    "HOA LIEN": "LNHOA", "HOMEOWNERS ASSOCIATION LIEN": "LNHOA",
-    "HOMEOWNER'S ASSOCIATION LIEN": "LNHOA",
+    "MATERIALMAN'S LIEN": "LNMECH", "HOA LIEN": "LNHOA",
+    "HOMEOWNERS ASSOCIATION LIEN": "LNHOA",
     "MEDICAID LIEN": "MEDLN", "MEDICAL LIEN": "MEDLN",
     "PROBATE": "PRO", "LETTERS TESTAMENTARY": "PRO",
     "LETTERS OF ADMINISTRATION": "PRO", "MUNIMENT OF TITLE": "PRO",
-    "AFFIDAVIT OF HEIRSHIP": "PRO", "WILL": "PRO",
+    "AFFIDAVIT OF HEIRSHIP": "PRO",
     "NOTICE OF COMMENCEMENT": "NOC",
     "RELEASE OF LIS PENDENS": "RELLP", "RELEASE LIS PENDENS": "RELLP",
 }
@@ -127,12 +119,9 @@ SEARCH_TERMS = [
     "LIS PENDENS", "NOTICE OF FORECLOSURE", "NOTICE OF TRUSTEE",
     "SUBSTITUTE TRUSTEE", "TAX DEED", "ABSTRACT OF JUDGMENT",
     "FEDERAL TAX LIEN", "IRS LIEN", "STATE TAX LIEN", "TWC LIEN",
-    "MECHANIC", "HOA LIEN", "HOMEOWNER", "MEDICAID LIEN",
-    "PROBATE", "LETTERS TESTAMENTARY", "NOTICE OF COMMENCEMENT",
-    "RELEASE LIS PENDENS",
+    "MECHANIC", "HOA LIEN", "MEDICAID LIEN", "PROBATE",
+    "LETTERS TESTAMENTARY", "NOTICE OF COMMENCEMENT", "RELEASE LIS PENDENS",
 ]
-
-# ── helpers ────────────────────────────────────────────────────────────────────
 
 def safe(v, default: str = "") -> str:
     return default if v is None else str(v).strip()
@@ -158,8 +147,7 @@ def map_instrument(raw: str) -> str | None:
 def norm_date(raw: str) -> str:
     if not raw:
         return ""
-    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d", "%m/%d/%Y",
-                "%Y%m%d", "%m-%d-%Y"):
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d", "%m/%d/%Y", "%Y%m%d"):
         try:
             return datetime.strptime(str(raw)[:19], fmt).strftime("%Y-%m-%d")
         except ValueError:
@@ -167,7 +155,7 @@ def norm_date(raw: str) -> str:
     return str(raw)[:10] if len(str(raw)) >= 10 else ""
 
 def doc_url(doc_id: str) -> str:
-    return f"{API_BASE}/doc/{doc_id}" if doc_id else API_BASE
+    return f"{BASE_URL}/doc/{doc_id}" if doc_id else BASE_URL
 
 def name_variants(name: str) -> list[str]:
     name = name.strip().upper()
@@ -181,8 +169,6 @@ def name_variants(name: str) -> list[str]:
         variants.add(f"{parts[-1]}, {' '.join(parts[:-1])}")
         variants.add(f"{' '.join(parts[1:])} {parts[0]}")
     return [v for v in variants if v]
-
-# ── scoring ────────────────────────────────────────────────────────────────────
 
 def score_record(rec: dict) -> tuple[int, list[str]]:
     flags: list[str] = list(DOC_TYPES.get(rec.get("doc_type", ""), {}).get("flags", []))
@@ -206,8 +192,8 @@ def score_record(rec: dict) -> tuple[int, list[str]]:
     if amt:
         if   amt > 100_000: score += 15
         elif amt >  50_000: score += 10
-    if "New this week"   in flags: score += 5
-    if rec.get("prop_address"):    score += 5
+    if "New this week" in flags: score += 5
+    if rec.get("prop_address"):   score += 5
     return min(score, 100), flags
 
 # ── parcel lookup ──────────────────────────────────────────────────────────────
@@ -219,267 +205,319 @@ class ParcelLookup:
         "https://www.bcad.org/publicinformation",
         "https://www.bcad.org",
     ]
-
     def __init__(self):
         self._index: dict[str, dict] = {}
-
     def load(self):
         if not HAS_DBF:
-            log.warning("dbfread not installed — address enrichment skipped.")
+            log.warning("dbfread not installed — skipped.")
             return
         dbf = self._find_dbf()
-        if dbf:
-            self._build_index(dbf)
-        else:
-            log.warning("No parcel DBF found — records will have no addresses.")
-
+        if dbf: self._build_index(dbf)
+        else: log.warning("No parcel DBF — no addresses.")
     def lookup(self, name: str) -> dict | None:
-        if not name:
-            return None
+        if not name: return None
         for v in name_variants(name):
             hit = self._index.get(v)
-            if hit:
-                return hit
+            if hit: return hit
         token = name.strip().upper().split()[0]
         if len(token) > 3:
             for key, val in self._index.items():
-                if key.startswith(token):
-                    return val
+                if key.startswith(token): return val
         return None
-
-    def _find_dbf(self) -> Path | None:
+    def _find_dbf(self):
         return self._try_bcad() or self._try_ptad()
-
-    def _try_bcad(self) -> Path | None:
+    def _try_bcad(self):
         cache = CACHE_DIR / "bcad_parcels.dbf"
         if cache.exists() and (time.time() - cache.stat().st_mtime) < 86_400:
-            log.info("Using cached BCAD DBF.")
             return cache
         for url in self.BCAD_URLS:
             try:
-                resp = requests.get(url, timeout=20, headers=HEADERS)
-                if not resp.ok:
-                    continue
+                resp = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+                if not resp.ok: continue
                 soup = BeautifulSoup(resp.text, "lxml")
                 for a in soup.find_all("a", href=True):
                     href: str = a["href"]
-                    if any(kw in href.lower() for kw in
-                           (".dbf", ".zip", "parcel", "apprais", "export", "download", "bulk")):
+                    if any(k in href.lower() for k in (".dbf",".zip","parcel","bulk","export")):
                         full = href if href.startswith("http") else urljoin(url, href)
-                        dl   = self._download(full, CACHE_DIR / "bcad_raw")
+                        dl = self._dl(full, CACHE_DIR / "bcad_raw")
                         if dl:
-                            dbf = self._unpack(dl)
-                            if dbf:
-                                return dbf
-            except Exception as e:
-                log.debug("BCAD %s: %s", url, e)
+                            dbf = self._unzip(dl)
+                            if dbf: return dbf
+            except Exception: pass
         return None
-
-    def _try_ptad(self) -> Path | None:
+    def _try_ptad(self):
         year = datetime.now().year
-        for y in (year, year - 1):
+        for y in (year, year-1):
             for pat in [
-                "https://comptroller.texas.gov/taxes/property-tax/county-directory/data/bexar-county-{y}.zip",
-                "https://comptroller.texas.gov/taxes/property-tax/county-directory/data/bexar-{y}.zip",
+                f"https://comptroller.texas.gov/taxes/property-tax/county-directory/data/bexar-county-{y}.zip",
             ]:
-                dl = self._download(pat.format(y=y), CACHE_DIR / f"ptad_bexar_{y}.zip")
+                dl = self._dl(pat, CACHE_DIR / f"ptad_{y}.zip")
                 if dl:
-                    dbf = self._unpack(dl)
-                    if dbf:
-                        return dbf
+                    dbf = self._unzip(dl)
+                    if dbf: return dbf
         return None
-
-    def _download(self, url: str, dest: Path) -> Path | None:
+    def _dl(self, url, dest):
         try:
-            with requests.get(url, stream=True, timeout=60, headers=HEADERS) as r:
-                if r.status_code != 200:
-                    return None
+            with requests.get(url, stream=True, timeout=60,
+                              headers={"User-Agent":"Mozilla/5.0"}) as r:
+                if r.status_code != 200: return None
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 with open(dest, "wb") as f:
-                    for chunk in r.iter_content(65_536):
-                        f.write(chunk)
+                    for chunk in r.iter_content(65536): f.write(chunk)
             return dest if dest.stat().st_size > 2048 else None
-        except Exception as e:
-            log.debug("Download %s: %s", url, e)
-            return None
-
-    def _unpack(self, path: Path) -> Path | None:
-        if path.suffix.lower() == ".dbf":
-            return path
+        except Exception: return None
+    def _unzip(self, path):
+        if path.suffix.lower() == ".dbf": return path
         if path.suffix.lower() == ".zip":
             try:
                 with zipfile.ZipFile(path) as zf:
-                    dbf_names = [n for n in zf.namelist() if n.lower().endswith(".dbf")]
-                    if not dbf_names:
-                        return None
-                    dbf_names.sort(key=lambda n: zf.getinfo(n).file_size, reverse=True)
-                    out = CACHE_DIR / Path(dbf_names[0]).name
-                    with zf.open(dbf_names[0]) as src, open(out, "wb") as dst:
-                        dst.write(src.read())
+                    names = [n for n in zf.namelist() if n.lower().endswith(".dbf")]
+                    if not names: return None
+                    names.sort(key=lambda n: zf.getinfo(n).file_size, reverse=True)
+                    out = CACHE_DIR / Path(names[0]).name
+                    with zf.open(names[0]) as s, open(out,"wb") as d: d.write(s.read())
                     return out
-            except zipfile.BadZipFile:
-                return None
+            except Exception: return None
         return None
-
-    def _build_index(self, path: Path):
-        log.info("Indexing parcels from %s …", path.name)
+    def _build_index(self, path):
+        log.info("Indexing parcels …")
         count = 0
         try:
-            table  = DBF(str(path), encoding="latin-1", ignore_missing_memofile=True)
+            table = DBF(str(path), encoding="latin-1", ignore_missing_memofile=True)
             fields = {f.name.upper() for f in table.fields}
-            def col(*candidates: str) -> str | None:
-                for c in candidates:
-                    if c.upper() in fields:
-                        return c.upper()
+            def col(*c):
+                for x in c:
+                    if x.upper() in fields: return x.upper()
                 return None
-            c_own    = col("OWN1",    "OWNER",       "OWNER_NAME",  "OWNERNAME",  "NAME")
-            c_site   = col("SITEADDR","SITE_ADDR",   "SITUS_ADDR",  "PROP_ADDR")
-            c_scity  = col("SITE_CITY","SITECITY",   "SITUS_CITY",  "PROP_CITY")
-            c_szip   = col("SITE_ZIP", "SITEZIP",    "SITUS_ZIP",   "PROP_ZIP")
-            c_mail1  = col("MAILADR1", "ADDR_1",     "MAIL_ADDR1",  "MAIL1")
-            c_mcity  = col("MAILCITY", "CITY",       "MAIL_CITY")
-            c_mstate = col("STATE",    "MAIL_STATE", "MAILSTATE")
-            c_mzip   = col("MAILZIP",  "ZIP",        "MAIL_ZIP")
+            c_own=col("OWN1","OWNER","OWNER_NAME","OWNERNAME","NAME")
+            c_site=col("SITEADDR","SITE_ADDR","SITUS_ADDR","PROP_ADDR")
+            c_scity=col("SITE_CITY","SITECITY","SITUS_CITY")
+            c_szip=col("SITE_ZIP","SITEZIP","SITUS_ZIP")
+            c_mail1=col("MAILADR1","ADDR_1","MAIL_ADDR1","MAIL1")
+            c_mcity=col("MAILCITY","CITY","MAIL_CITY")
+            c_mstate=col("STATE","MAIL_STATE","MAILSTATE")
+            c_mzip=col("MAILZIP","ZIP","MAIL_ZIP")
             for row in table:
                 try:
                     owner = safe(row.get(c_own)) if c_own else ""
-                    if not owner:
-                        continue
+                    if not owner: continue
                     parcel = {
-                        "prop_address": safe(row.get(c_site))   if c_site   else "",
-                        "prop_city":    safe(row.get(c_scity))  if c_scity  else "",
+                        "prop_address": safe(row.get(c_site)) if c_site else "",
+                        "prop_city":    safe(row.get(c_scity)) if c_scity else "",
                         "prop_state":   "TX",
-                        "prop_zip":     safe(row.get(c_szip))   if c_szip   else "",
-                        "mail_address": safe(row.get(c_mail1))  if c_mail1  else "",
-                        "mail_city":    safe(row.get(c_mcity))  if c_mcity  else "",
+                        "prop_zip":     safe(row.get(c_szip)) if c_szip else "",
+                        "mail_address": safe(row.get(c_mail1)) if c_mail1 else "",
+                        "mail_city":    safe(row.get(c_mcity)) if c_mcity else "",
                         "mail_state":   safe(row.get(c_mstate)) if c_mstate else "TX",
-                        "mail_zip":     safe(row.get(c_mzip))   if c_mzip   else "",
+                        "mail_zip":     safe(row.get(c_mzip)) if c_mzip else "",
                     }
-                    for v in name_variants(owner):
-                        self._index[v] = parcel
+                    for v in name_variants(owner): self._index[v] = parcel
                     count += 1
-                except Exception:
-                    continue
+                except Exception: continue
         except Exception as e:
-            log.error("DBF read error: %s", e)
-        log.info("Parcel index: %d owners, %d keys.", count, len(self._index))
+            log.error("DBF error: %s", e)
+        log.info("Parcel index: %d owners.", count)
 
 # ── clerk scraper ──────────────────────────────────────────────────────────────
 
 class ClerkScraper:
     """
-    Calls the GovOS/publicsearch.us REST API.
+    GovOS publicsearch.us platform scraper.
 
-    Real URL pattern discovered from browser network traffic:
-    GET /results?department=RP
-                &recordedDateRange=20240101,20240131
-                &searchType=quickSearch
-                &searchValue=LIS+PENDENS
-                &limit=50&offset=0
-                &searchOcrText=false
-                &keywordSearch=false
+    The platform is a React SPA that makes XHR calls.
+    We establish a session by hitting the homepage, then call the
+    internal search API that the frontend uses.
 
-    Response JSON shape (from observed URLs):
-    { hits: [...], totalHits: N }
+    Known API patterns for GovOS/publicsearch platforms:
+    - POST /api/search  (JSON body)
+    - GET  /api/instruments?...
+    - GET  /results?...  (returns HTML shell, not JSON — need XHR headers)
     """
 
     def __init__(self, start: datetime, end: datetime):
-        self.start    = start
-        self.end      = end
-        self._seen:   set[str] = set()
-        self.raw:     list[dict] = []
+        self.start  = start
+        self.end    = end
+        self._seen: set[str] = set()
+        self.raw:   list[dict] = []
         self._session = requests.Session()
-        self._session.headers.update(HEADERS)
-        # date range string for the API: YYYYMMDD,YYYYMMDD
-        self._date_range = (
-            f"{start.strftime('%Y%m%d')},"
-            f"{end.strftime('%Y%m%d')}"
-        )
+        self._start_str = start.strftime("%Y-%m-%d")
+        self._end_str   = end.strftime("%Y-%m-%d")
+        self._start_compact = start.strftime("%Y%m%d")
+        self._end_compact   = end.strftime("%Y%m%d")
 
     def run(self) -> list[dict]:
-        log.info("Starting Bexar County GovOS API scrape …")
-        log.info("Date range: %s", self._date_range)
+        log.info("Establishing session with GovOS platform …")
+
+        # Step 1: Hit homepage to get cookies/session
+        try:
+            home_resp = self._session.get(
+                BASE_URL, headers={
+                    "User-Agent": HEADERS["User-Agent"],
+                    "Accept": "text/html,application/xhtml+xml,*/*",
+                }, timeout=30
+            )
+            log.info("Homepage: HTTP %s", home_resp.status_code)
+            # Extract any XSRF token from cookies or meta tags
+            xsrf = home_resp.cookies.get("XSRF-TOKEN") or \
+                   home_resp.cookies.get("xsrf-token") or ""
+            if xsrf:
+                self._session.headers["X-XSRF-TOKEN"] = xsrf
+                log.info("Got XSRF token.")
+        except Exception as e:
+            log.warning("Homepage load failed: %s", e)
+
+        # Step 2: Update session headers for API calls
+        self._session.headers.update(HEADERS)
+
+        # Step 3: Try each known API endpoint pattern
+        api_patterns = [
+            self._try_api_search,
+            self._try_results_xhr,
+            self._try_api_v2,
+        ]
 
         for term in SEARCH_TERMS:
-            try:
-                recs = self._fetch_term(term)
-                if recs:
-                    log.info("  %-35s → %d records", term, len(recs))
-                self.raw.extend(recs)
-                time.sleep(REQUEST_DELAY)
-            except Exception as e:
-                log.warning("Term '%s' error: %s", term, e)
+            found = False
+            for pattern_fn in api_patterns:
+                try:
+                    recs = pattern_fn(term, 0)
+                    if recs is not None:  # None = method doesn't work, [] = no results
+                        if recs:
+                            log.info("  %-35s → %d records", term, len(recs))
+                        self.raw.extend(recs)
+                        found = True
+                        break
+                except Exception as e:
+                    log.debug("Pattern %s for '%s': %s", pattern_fn.__name__, term, e)
+            if not found:
+                log.debug("No working API pattern for term '%s'", term)
+            time.sleep(REQUEST_DELAY)
 
         log.info("Scrape done: %d raw records.", len(self.raw))
         return self.raw
 
-    def _fetch_term(self, term: str) -> list[dict]:
-        all_recs: list[dict] = []
-        offset = 0
-
-        while True:
-            params = {
-                "department":       DEPT,
-                "recordedDateRange": self._date_range,
-                "searchType":       "quickSearch",
-                "searchValue":      term,
-                "limit":            PAGE_SIZE,
-                "offset":           offset,
-                "searchOcrText":    "false",
-                "keywordSearch":    "false",
-            }
-
-            data = None
-            for attempt in range(RETRY_MAX):
+    def _try_api_search(self, term: str, offset: int) -> list[dict] | None:
+        """POST /api/search with JSON body — most common GovOS pattern."""
+        url = f"{BASE_URL}/api/search"
+        body = {
+            "searchValue":      term,
+            "searchType":       "quickSearch",
+            "department":       "RP",
+            "startDate":        self._start_str,
+            "endDate":          self._end_str,
+            "limit":            PAGE_SIZE,
+            "offset":           offset,
+            "searchOcrText":    False,
+            "keywordSearch":    False,
+        }
+        try:
+            r = self._session.post(url, json=body, timeout=30)
+            log.debug("POST /api/search → HTTP %s", r.status_code)
+            if r.status_code in (404, 405, 501):
+                return None  # endpoint doesn't exist
+            if r.status_code == 200:
                 try:
-                    r = self._session.get(
-                        RESULTS_URL, params=params, timeout=30
-                    )
-                    if r.status_code == 200:
-                        data = r.json()
-                        break
-                    log.debug("HTTP %s for term '%s'", r.status_code, term)
-                except Exception as e:
-                    log.debug("Attempt %d for '%s': %s", attempt + 1, term, e)
-                time.sleep(2 * (attempt + 1))
+                    data = r.json()
+                    return self._extract_hits(data, term)
+                except Exception:
+                    return None
+        except Exception:
+            pass
+        return None
 
-            if not data:
-                break
-
-            # GovOS response shape
-            hits = (
-                data.get("hits") or
-                data.get("results") or
-                data.get("records") or
-                (data if isinstance(data, list) else [])
+    def _try_results_xhr(self, term: str, offset: int) -> list[dict] | None:
+        """
+        GET /results with XHR headers — the React app hits this via fetch().
+        Some GovOS deployments return JSON when Accept: application/json is set.
+        """
+        params = {
+            "department":        "RP",
+            "recordedDateRange": f"{self._start_compact},{self._end_compact}",
+            "searchType":        "quickSearch",
+            "searchValue":       term,
+            "limit":             PAGE_SIZE,
+            "offset":            offset,
+            "searchOcrText":     "false",
+            "keywordSearch":     "false",
+        }
+        try:
+            r = self._session.get(
+                f"{BASE_URL}/results",
+                params=params,
+                headers={**HEADERS, "Accept": "application/json"},
+                timeout=30
             )
-            total = data.get("totalHits") or data.get("total") or len(hits)
+            log.debug("GET /results → HTTP %s, Content-Type: %s",
+                      r.status_code, r.headers.get("content-type",""))
+            if r.status_code != 200:
+                return None
+            ct = r.headers.get("content-type", "")
+            if "json" not in ct:
+                # Returned HTML — this pattern doesn't work for JSON
+                log.debug("GET /results returned HTML, not JSON")
+                return None
+            data = r.json()
+            return self._extract_hits(data, term)
+        except Exception:
+            pass
+        return None
 
-            if not hits:
-                break
+    def _try_api_v2(self, term: str, offset: int) -> list[dict] | None:
+        """Try alternate GovOS API paths."""
+        for path in [
+            "/api/records/search",
+            "/api/v1/search",
+            "/api/instruments",
+            "/search/api",
+        ]:
+            try:
+                params = {
+                    "q":         term,
+                    "dept":      "RP",
+                    "startDate": self._start_str,
+                    "endDate":   self._end_str,
+                    "limit":     PAGE_SIZE,
+                    "offset":    offset,
+                }
+                r = self._session.get(
+                    f"{BASE_URL}{path}", params=params, timeout=20
+                )
+                if r.status_code == 200:
+                    try:
+                        data = r.json()
+                        hits = self._extract_hits(data, term)
+                        if hits is not None:
+                            log.info("Working API path found: %s", path)
+                            return hits
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        return None
 
-            batch = self._parse_hits(hits, term)
-            all_recs.extend(batch)
+    def _extract_hits(self, data: Any, hint_term: str) -> list[dict] | None:
+        """Extract records from any GovOS JSON response shape."""
+        if not isinstance(data, (dict, list)):
+            return None
 
-            offset += PAGE_SIZE
-            if offset >= int(total) or len(hits) < PAGE_SIZE:
-                break
-            if offset > 5000:
-                log.warning("Hit 5000-record cap for '%s'", term)
-                break
+        hits = []
+        if isinstance(data, list):
+            hits = data
+        else:
+            hits = (
+                data.get("hits") or data.get("results") or
+                data.get("records") or data.get("data") or
+                data.get("documents") or []
+            )
 
-            time.sleep(REQUEST_DELAY)
+        if not isinstance(hits, list):
+            return None
 
-        return all_recs
-
-    def _parse_hits(self, hits: list, hint_term: str) -> list[dict]:
         records: list[dict] = []
         for hit in hits:
             try:
                 if not isinstance(hit, dict):
                     continue
-
-                # GovOS field names
                 doc_num = safe(
                     hit.get("instrumentNumber") or hit.get("documentNumber") or
                     hit.get("docNumber") or hit.get("id") or hit.get("recordId") or ""
@@ -493,7 +531,6 @@ class ClerkScraper:
                     hit.get("instrumentType") or hit.get("type") or hint_term
                 )
 
-                # Grantor/Grantee — may be list of dicts or plain strings
                 def extract_names(field) -> str:
                     val = hit.get(field, [])
                     if isinstance(val, list):
@@ -508,7 +545,6 @@ class ClerkScraper:
 
                 grantor = extract_names("grantors") or extract_names("grantor")
                 grantee = extract_names("grantees") or extract_names("grantee")
-
                 recorded = safe(
                     hit.get("recordedDate") or hit.get("filedDate") or
                     hit.get("instrumentDate") or hit.get("date") or ""
@@ -521,7 +557,6 @@ class ClerkScraper:
                     hit.get("legalDescription") or hit.get("legal") or
                     hit.get("description") or ""
                 )[:300]
-
                 doc_id = safe(hit.get("id") or hit.get("docId") or doc_num)
                 clerk_url = hit.get("url") or hit.get("documentUrl") or doc_url(doc_id)
 
@@ -548,56 +583,39 @@ def filter_and_enrich(raw, parcel, start, end):
     for r in raw:
         try:
             code = r.get("doc_code")
-            if not code or code not in TARGET_CODES:
-                continue
+            if not code or code not in TARGET_CODES: continue
             num = safe(r.get("doc_num"))
-            if not num or num in seen:
-                continue
+            if not num or num in seen: continue
             seen.add(num)
             filed = safe(r.get("filed"))
             if filed:
                 try:
                     fd = datetime.strptime(filed, "%Y-%m-%d")
-                    if not (start <= fd <= end):
-                        continue
-                except ValueError:
-                    pass
+                    if not (start <= fd <= end): continue
+                except ValueError: pass
             meta  = DOC_TYPES[code]
             owner = safe(r.get("owner"))
             pd    = parcel.lookup(owner) or {}
             rec: dict[str, Any] = {
-                "doc_num":      num,
-                "doc_type":     code,
-                "filed":        filed,
-                "cat":          meta["cat"],
-                "cat_label":    meta["label"],
-                "owner":        owner,
-                "grantee":      safe(r.get("grantee")),
-                "amount":       r.get("amount"),
+                "doc_num":      num, "doc_type":     code,
+                "filed":        filed, "cat":          meta["cat"],
+                "cat_label":    meta["label"], "owner":        owner,
+                "grantee":      safe(r.get("grantee")), "amount": r.get("amount"),
                 "legal":        safe(r.get("legal")),
-                "prop_address": pd.get("prop_address", ""),
-                "prop_city":    pd.get("prop_city", ""),
-                "prop_state":   pd.get("prop_state", "TX"),
-                "prop_zip":     pd.get("prop_zip", ""),
-                "mail_address": pd.get("mail_address", ""),
-                "mail_city":    pd.get("mail_city", ""),
-                "mail_state":   pd.get("mail_state", "TX"),
-                "mail_zip":     pd.get("mail_zip", ""),
-                "clerk_url":    safe(r.get("clerk_url")),
-                "flags":        [],
-                "score":        0,
+                "prop_address": pd.get("prop_address",""), "prop_city": pd.get("prop_city",""),
+                "prop_state":   pd.get("prop_state","TX"), "prop_zip": pd.get("prop_zip",""),
+                "mail_address": pd.get("mail_address",""), "mail_city": pd.get("mail_city",""),
+                "mail_state":   pd.get("mail_state","TX"), "mail_zip": pd.get("mail_zip",""),
+                "clerk_url":    safe(r.get("clerk_url")), "flags": [], "score": 0,
             }
             score, flags = score_record(rec)
-            rec["score"] = score
-            rec["flags"] = flags
+            rec["score"] = score; rec["flags"] = flags
             results.append(rec)
         except Exception as e:
             log.debug("Enrich error: %s", e)
     results.sort(key=lambda x: x["score"], reverse=True)
     log.info("Enriched: %d valid records from %d raw.", len(results), len(raw))
     return results
-
-# ── output writers ─────────────────────────────────────────────────────────────
 
 def write_json(records, start, end):
     payload = {
@@ -617,12 +635,10 @@ def write_json(records, start, end):
 def write_ghl_csv(records):
     out = DATA_DIR / "ghl_export.csv"
     FIELDS = [
-        "First Name","Last Name",
-        "Mailing Address","Mailing City","Mailing State","Mailing Zip",
+        "First Name","Last Name","Mailing Address","Mailing City","Mailing State","Mailing Zip",
         "Property Address","Property City","Property State","Property Zip",
         "Lead Type","Document Type","Date Filed","Document Number",
-        "Amount/Debt Owed","Seller Score","Motivated Seller Flags",
-        "Source","Public Records URL",
+        "Amount/Debt Owed","Seller Score","Motivated Seller Flags","Source","Public Records URL",
     ]
     def split_name(full):
         full = full.strip()
@@ -636,7 +652,7 @@ def write_ghl_csv(records):
         w = csv.DictWriter(f, fieldnames=FIELDS)
         w.writeheader()
         for r in records:
-            first, last = split_name(r.get("owner", ""))
+            first, last = split_name(r.get("owner",""))
             w.writerow({
                 "First Name": first, "Last Name": last,
                 "Mailing Address": r.get("mail_address",""), "Mailing City": r.get("mail_city",""),
@@ -653,34 +669,20 @@ def write_ghl_csv(records):
             })
     log.info("GHL CSV: %s  (%d rows)", out, len(records))
 
-# ── main ───────────────────────────────────────────────────────────────────────
-
 def main():
     log.info("━"*55)
     log.info("  Bexar County TX (San Antonio) — Motivated Seller Leads")
     log.info("━"*55)
-    log.info("Lookback: %d days", LOOKBACK_DAYS)
     end   = datetime.now().replace(hour=23, minute=59, second=59, microsecond=0)
     start = (end - timedelta(days=LOOKBACK_DAYS)).replace(hour=0, minute=0, second=0, microsecond=0)
-    log.info("Range   : %s → %s", start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
+    log.info("Range: %s → %s", start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
 
-    log.info("Step 1/4 — Parcel data")
-    parcel = ParcelLookup()
-    parcel.load()
-
-    log.info("Step 2/4 — Clerk API")
-    raw = ClerkScraper(start, end).run()
-
-    log.info("Step 3/4 — Filter & enrich")
+    parcel = ParcelLookup(); parcel.load()
+    raw    = ClerkScraper(start, end).run()
     records = filter_and_enrich(raw, parcel, start, end)
-
-    log.info("Step 4/4 — Write outputs")
     write_json(records, start, end)
     write_ghl_csv(records)
-
-    log.info("━"*55)
     log.info("DONE — %d leads saved.", len(records))
-    log.info("━"*55)
 
 if __name__ == "__main__":
     main()

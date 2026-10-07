@@ -1,10 +1,10 @@
 {
-  "fetched_at": "2026-10-06T14:33:58.416618+00:00",
+  "fetched_at": "2026-10-07T14:50:47.862702+00:00",
   "source": "Bexar County Clerk \u2013 bexar.tx.publicsearch.us",
   "county": "Bexar County, TX (San Antonio)",
   "date_range": {
-    "from": "2026-09-29",
-    "to": "2026-10-06"
+    "from": "2026-09-30",
+    "to": "2026-10-07"
   },
   "total": 0,
   "with_address": 0,
